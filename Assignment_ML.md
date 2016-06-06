@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 # Predicting quality of physical activity using dumbbell movement
 =======
-# Predicting quality of physical activity using dumbell movement
->>>>>>> origin/master
 Marcelo Szilagyi  
 May 30, 2016  
 # Summary
