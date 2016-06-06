@@ -1,0 +1,257 @@
+---
+title: "Predicting quality of physical activity using dumbbell movement"
+author: "Marcelo Szilagyi"
+date: "May 30, 2016"
+output: 
+  html_document: 
+    theme: sandstone
+    highlight: tango
+    keep_md: yes
+---
+# Summary
+Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). 
+The objective was to create a model capable to predict the classes. 
+After testing multiple classifiers methods with a very small sample, a random tree model was adopted to train the dataset. 
+The final model had 250 trees with up to 24 variables in each tree and delivered a balanced accuracy of 99.7% in the testing set. 
+
+# Data obtention and cleaning
+## Getting Data
+I loaded required packages and downloaded the data from indicated website.
+
+```{r, cache=TRUE,results="hide",warning=FALSE,error=FALSE, message=FALSE}
+# load all packages required to the analysis
+require(data.table);require(caret);require(ggplot2);require(proxy);require(RANN); require (RCurl); library(RCurl);require(ggRandomForests)
+```
+
+```{r, cache=TRUE}
+# get data from website. 
+options(RCurlOptions = list(cainfo = system.file("CurlSSL", "cacert.pem", package = "RCurl")))   
+URL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv" ; trainingRaw <- getURL(URL)
+URL1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv" ; testingRaw <- getURL(URL1)
+```
+After an initial check, I changed the string during importation in R to exclude "#DIV/0!" results and enforced that most of columns were numeric values, except the variable of interest (factor). I also set the seed for the remainder of the analysis.
+
+```{r, cache=TRUE}
+set.seed(777)
+training <- fread(trainingRaw,na.strings=c("NA","N/A","null",'',"#DIV/0!"))
+# checking the variables that are chars and number of unique values per variable
+issues  <- sapply((training[,which(sapply(training,mode)!="numeric"),with=FALSE]),function(x)length(unique(x)))
+# my decision is to use as numeric for most of the data column 7 to 159
+strTmp = names(training)[7:159]
+training[, (strTmp) := lapply(.SD, as.numeric), .SDcols = strTmp]
+# there were 5 columns left: user_name, new_window and classe are factors; V1 is numeric (index) and ctvd_timestamp is kept as char. 
+training$user_name <- as.factor(training$user_name); training$new_window <- as.factor(training$new_window); training$classe = as.factor(training$classe); training$V1=as.numeric(training$V1)
+
+# this "testing" set is really just 20 records for quiz purposes
+testing <- fread(testingRaw,na.strings=c("NA","N/A","null",'',"#DIV/0!"))
+# checking the variables that are chars and number of unique values per variable
+issues  <- sapply((testing[,which(sapply(testing,mode)!="numeric"),with=FALSE]),function(x)length(unique(x)))
+# my decision is to use as numeric for most of the data column 7 to 159
+strTmp = names(testing)[7:159]
+testing[, (strTmp) := lapply(.SD, as.numeric), .SDcols = strTmp]
+# there were 5 columns left: user_name, new_window and classe are factors; V1 is numeric (index) and ctvd_timestamp is kept as char. 
+testing$user_name <- as.factor(testing$user_name); testing$new_window <- as.factor(testing$new_window); testing$V1=as.numeric(testing$V1)
+
+```
+## Split into training, test and validation sets 
+
+The size of the testing set (20 cases) is too small for a real testing set. 
+I decided to split the training set provided into 3 testing sets: training, testing and validation. 
+I took a small portion of the training set and used to crate a small "play" set.
+I will use this small "play" set (5% of the training set or ~ 588 cases ) to run multiple classification methods/algorithms and based on accuracy, define the method that I will apply for the training set.
+
+```{r, cache=TRUE}
+ trainingRows<-createDataPartition(training$classe, p=0.60, list=FALSE) # creating training set
+ mytrain <- training[c(trainingRows)] 
+ mytestandvalidation <- training[c(-trainingRows)] # the rest is either test or validation
+ testingRows<-createDataPartition(mytestandvalidation$classe, p=0.50, list=FALSE) # create test set
+ mytest <- mytestandvalidation[c(testingRows)]
+ myvalidation <- mytestandvalidation[c(-testingRows)] # create validation set
+ smallRows<-createDataPartition(mytrain$classe, p=0.05, list=FALSE)  # small set to play with models
+ small <- mytrain[c(smallRows)]
+```
+
+I excluded from analysis the variables with more than 90% of data with NAs.   
+After that, I excluded an index variable (V1), user name and time stamps. 
+Finally, I excluded low variance cases and high correlated variables.  
+I created a function that runs that for future usage on other sets.  
+
+```{r, cache=T}
+CleaningPred <- function(x) { 
+# identify variables with more than 90% of NAs
+TooMuchNas = sapply(x, function(x) sum(is.na(x))) / sapply(x, function(x) length(x));  
+TooMuchNasNames = names(which(TooMuchNas>0.90))
+# remove near zero variances - less than 10 unique values and 95% of samples with the same value (caret defaults)
+Zerovar <- nearZeroVar(x[,-TooMuchNasNames, with=FALSE], saveMetrics= F); ZeroVarNames =  names(x[,Zerovar, with=FALSE])
+numericFieldsNames <- names(which((sapply(x[,!c(ZeroVarNames,TooMuchNasNames),with=F], is.numeric))==TRUE))
+# remove high variance cases  - 0.9 of correlation (caret default)
+HighCorIndex  <-  (findCorrelation(cor(x[ , numericFieldsNames, with=FALSE])))
+HighCorNames  <-  names(x[ , numericFieldsNames, with=FALSE][,HighCorIndex, with=FALSE])
+# identify all variable names that are NAs, zero variance or high correlated
+AllBadNames  <-  c(ZeroVarNames,TooMuchNasNames,HighCorNames); AllNames=names(x)
+GoodNames  <-  AllNames[!AllNames%in%AllBadNames]
+# remove V1, timestamps, user name
+GoodNames  <-  GoodNames[!GoodNames%in%c( "V1","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","classe")]
+return(GoodNames)
+}
+# use method in the play set 
+smallNames = CleaningPred(small) 
+``` 
+# Data Analysis
+
+##Testing of multiple models in the play set:
+
+I tested multiple models in the small set to reduce all the possible options to few. I used the *dissimilarity* concept presented in the caret  http://topepo.github.io/caret/similarity.html to select models that were not part of the same cluster and started with the "glmnet" method (generalized multinomial logit model). The code in the referenced site creates the most dissimilar models that are able to handle classification problems.
+
+```{r, cache=TRUE}
+# code and csv the site http://topepo.github.io/caret/similarity.html 
+tag <- read.csv("tag_data.csv", row.names = 1)
+tag <- as.matrix(tag)
+# Select only models for regression
+regModels <- tag[tag[,"Classification"] == 1,]
+
+all <- 1:nrow(regModels)
+# Seed the analysis with the glm model
+start <- grep("(glmnet)", rownames(regModels), fixed = TRUE)
+pool <- all[all != start]
+n = 10
+
+# Select 4 model models by maximizing the Jaccard
+# dissimilarity between sets of models
+nextMods <- maxDissim(regModels[start,,drop = FALSE],
+                      regModels[pool, ],
+                      method = "Jaccard",
+                      n = n)
+
+somemodels = rownames(regModels)[c(start, nextMods)]
+
+```
+
+Based on the results above, I trained the small set with the multiple models and plot the accuracy for a final selection. 
+Models that did not present a result due to errors -  library not available, dependencies with error, error in the results -  were replaced by the next available choice.  
+
+Additionally, based on http://jmlr.org/papers/volume15/delgado14a/delgado14a.pdf, I added the "parRF" (parallel random forest) model. 
+The preprocessing includes knn to populate NA's, scaling and centering. To improve performance, I reduced the cross validations from 25 to 10.
+
+```{r, cache=TRUE, warning=FALSE, message=FALSE}
+control <- trainControl(method = "cv",number = 10,allowParallel = TRUE) # for fast selection of potential models, set cross validation for 10 folds
+preProcValues <- preProcess(small[,smallNames,with=FALSE], method = c("center", "scale", "knnImpute"))
+trainTransformed <- predict(preProcValues, small[,smallNames,with=FALSE])
+# testTransformed <- predict(preProcValues, test)
+mod01 = train(y = small$classe, x=trainTransformed, trControl=control, method = "glmnet")
+mod02 = train(y = small$classe, x=trainTransformed, trControl=control, method = "svmRadialSigma")
+mod03 = train(y = small$classe, x=trainTransformed, trControl=control, method = "pcaNNet", trace=FALSE)
+mod04 = train(y = small$classe, x=trainTransformed, trControl=control, method = "bdk")
+mod05 = train(y = small$classe, x=trainTransformed, trControl=control, method = "J48")
+mod06 = train(y = small$classe, x=trainTransformed, trControl=control, method = "ranger")
+mod07 = train(y = small$classe, x=trainTransformed, trControl=control, method = "fda")
+mod08 = train(y = small$classe, x=trainTransformed, trControl=control, method = "rf")
+mod09 = train(y = small$classe, x=trainTransformed, trControl=control, method=  "parRF")
+
+summarySmallMethod = vector();summarySmallConfusion = vector(); summarySmallModName = vector()
+
+for (i in 1:9) {
+  lmod = ls(pattern="^mod")[i]
+  summarySmallModName[i] = lmod
+  summarySmallMethod[i] = get(lmod)$method
+  summarySmallConfusion[i] = sum(diag(confusionMatrix(get(lmod))$table))}
+
+knitr::kable(data.table(Model = summarySmallModName, 
+                        Method = summarySmallMethod, 
+                        Accuraccy = round(summarySmallConfusion,1)))
+```
+
+The model I adopted for modeling was the parRF as it delivered an accuracy above 85% for this very small set (one of the top 3 performers) and is the one recommended by the classifier review paper mentioned above. 
+
+## Using the parRF in training, testing and validation sets:
+
+The next part of the code executes the training for 60% of the original training set and predicts for the validation set. The expected result is a similar accuracy or higher. Instead of using a 10 cross fold validation, I reversed to the caret default: 25 cross validations. 
+
+```{r, cache=TRUE}
+# remove useless variables using the same logic presented above 
+smallNames = CleaningPred(mytrain) 
+# pre processing
+preProcValues <- preProcess(mytrain[,smallNames,with=FALSE], method = c("center", "scale", "knnImpute")) 
+# transform variables
+trainTransformed <- predict(preProcValues, mytrain[,smallNames,with=FALSE]) 
+# run the model
+mod12 = train(y = mytrain$classe, x=trainTransformed, method=  "parRF") 
+treeuse  = data.frame(mytrain$classe,trainTransformed) #for future use
+```
+
+```{r, cache=TRUE, echo=FALSE}
+valTransformed <- predict(preProcValues, myvalidation[,smallNames,with=FALSE])
+predictMyValidation = predict(mod12,valTransformed)
+CMMyValidation = confusionMatrix (predictMyValidation,mytest$classe)
+Accuracy = round(CMMyValidation$overall[1],5)
+CMMyValidation$table
+```
+
+The results of the model are very positive. For a total of `r dim(myvalidation)[1]` cases, the model just predicts incorrectly `r dim(mytest)[1]-sum(diag(CMMyValidation$table))` cases. As it is unreasonable to expect better performance, I applied the same model to my testing set (not the 20 cases.)
+
+```{r, cache=TRUE}
+testTransformed <- predict(preProcValues, mytest[,smallNames,with=FALSE])
+predictMyTest = predict(mod12,testTransformed)
+CMMytest = confusionMatrix (predictMyTest,mytest$classe)
+Accuracy = round(CMMytest$overall[1],5)
+CMMytest$table
+```
+
+The results of the model on the testing set confirm the results. For a total of `r dim(mytest)[1]` cases, the model just predicts incorrectly `r dim(mytest)[1]-sum(diag(CMMytest$table))` cases. The Accuracy is `r round(Accuracy,4)`.
+
+## Analysis of the results
+
+All variables can be listed according to its relative importance to the model: 
+
+```{r, cache=TRUE, echo=FALSE}
+Importance  = varImp(mod12$finalModel);
+names = rownames(Importance)[order(-Importance$Overall)]
+valueimp = Importance[order(-Importance$Overall),]
+tableImp = data.frame(names, valueimp)
+rm(names);rm(valueimp) ; levels = tableImp$names[order(tableImp$valueimp)]
+tableImp$names2 = factor(tableImp$names, levels = levels)
+
+top6 = tableImp[1:9,]
+
+ggplot(data=tableImp, aes(x=names2, y=valueimp)) +
+    geom_bar(stat="identity") +coord_flip() + 
+    labs(x = "Variable name",
+       y = "Relative Importance",
+       title = "Variable importance by predictor")
+
+
+```
+
+The out of bag error overall decreases as the number of tree increases. However, there is no significant improvement after 50 trees and most of the error is reduced with the usage of 25 trees between 0.6 and 0.8%.
+
+
+```{r, cache=TRUE, echo=FALSE}
+OOBerror = data.frame(tree = (1:250), per_error = mod12$finalModel$err.rate[,1]*100)
+OOBerror = OOBerror[-which(diff(OOBerror$per_error)>0),]
+notered = OOBerror[OOBerror$tree==24,]
+
+ggplot(OOBerror, aes(x = tree, y = per_error))+geom_point()+geom_smooth(method="glm", formula = y~log(x), se = TRUE)+ labs(x = "Number of Trees", y = "Error %",title = "Out of bag error by number of trees in RF")+  geom_point(data=notered, colour="red") +
+    geom_text(data=notered, label=paste0("Error rate: ",round(notered$per_error,3)), vjust=1)
+
+```
+
+
+Finally, it is possible to select the most important variables for the random forest model and present the importance of those to determine the first classe (A).
+
+```{r, cache=TRUE, echo=FALSE}
+par(mfrow=c(3, 3), oma = c(4, 1, 1, 1), xpd=NA)
+for (i in 1:nrow(top6)) {
+partialPlot(mod12$finalModel,trainTransformed, (as.character(top6[i,1])),
+            main = as.character(top6[i,1]),
+            xlab = as.character(top6[i,1]))}
+title("Partial Dependence", outer=TRUE) 
+```
+
+## Prediction for the small testing set (20 questions)
+
+The predictions for the 20 "testing" set (for quiz purposes) is show below:
+
+```{r, r, cache=TRUE}
+testingTransformed <- predict(preProcValues, testing[,smallNames,with=FALSE])
+predict(mod12$finalModel,testingTransformed)
+```
