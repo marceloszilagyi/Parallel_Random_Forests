@@ -1,7 +1,7 @@
 # Predicting quality of physical activity using dumbbell movement
-=======
+
 Marcelo Szilagyi  
-May 30, 2016  
+
 # Summary
 Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). 
 The objective was to create a model capable to predict the classes. 
